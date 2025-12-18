@@ -1,6 +1,9 @@
 import javafx.application.Application;
 import javafx.scene.Scene;
 import javafx.scene.layout.Pane;
+import javafx.scene.paint.Color;
+import javafx.scene.shape.Circle;
+import javafx.scene.shape.Rectangle;
 import javafx.stage.Stage;
 
 
@@ -34,5 +37,24 @@ public class Tabellone extends Application {
         String gruppo = "230.0.0.1";
         MulticastSocket socket = new MulticastSocket(porta);
         socket.joinGroup(InetAddress.getByName(gruppo));
+
+        DatagramPacket packetIN = new DatagramPacket(bufferIn, bufferIn.length);
+        socket.receive(packetIN);
+        String messaggioRicevuto = new String(packetIN.getData(), 0, packetIN.getLength());
+
+        String[] info = messaggioRicevuto.split(":");
+        int ctr=0;
+
+        while (ctr < info.length && !info[ctr].equals("over")){
+            switch(info[ctr]){
+                case "b":
+                    Rectangle blocco = new Rectangle(50, 50);
+                    blocco.setTranslateX(Integer.parseInt(info[ctr+1]));
+                    blocco.setTranslateY(info[ctr+1]);
+
+                    ctr+=3;
+                    break;
+            }
+        }
     }
 }
