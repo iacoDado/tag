@@ -14,14 +14,18 @@ import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.MulticastSocket;
 
-import java.net.InetAddress;
-import java.net.MulticastSocket;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 public class Tabellone extends Application {
 
     private final Set<String> tastiPremuti = new HashSet<>();
+    private Circle giocatoreC;
+    boolean creatoGiocatoreC = false;
+    //mappa che associa il colore del giocatore al suo oggetto Circle
+    private final Map<String, Circle> altriGiocatori = new HashMap<>();
 
     @Override
     public void start(Stage primaryStage) {
@@ -31,7 +35,7 @@ public class Tabellone extends Application {
         //gestione tasti sulla scena
         scene.setOnKeyPressed(e -> {
             tastiPremuti.add(e.getCode().toString());
-            System.out.println("Tasto premuto: " + e.getCode()); // DEBUG!!! togliere dopo
+            //System.out.println("Tasto premuto: " + e.getCode()); // DEBUG!!! togliere dopo
         });
         scene.setOnKeyReleased(e -> tastiPremuti.remove(e.getCode().toString()));
 
@@ -56,27 +60,65 @@ public class Tabellone extends Application {
     }
 
     private void inizializzaTabellone(Pane root) throws IOException {
-        MulticastSocket socket = new MulticastSocket(1234);
+        int port = 1234;
+        MulticastSocket socket = new MulticastSocket(port);
         InetAddress group = InetAddress.getByName("230.0.0.1");
         socket.joinGroup(group);
 
-        byte[] bufferIn = new byte[1024];
-        DatagramPacket packetIN = new DatagramPacket(bufferIn, bufferIn.length);
+        String messaggioRicevuto = "";
 
-        socket.receive(packetIN);
-        String messaggioRicevuto = new String(packetIN.getData(), 0, packetIN.getLength());
+        do {
+            byte[] bufferIn = new byte[1024];
+            DatagramPacket packetIN = new DatagramPacket(bufferIn, bufferIn.length);
 
-        //  !!!     Importante: Gli aggiornamenti grafici (root.getChildren().add) devono tornare sul thread JavaFX tramite Platform.runLater
-        Platform.runLater(() -> {
-            elaboraMessaggio(messaggioRicevuto, root);
-        });
+            socket.receive(packetIN);
+            messaggioRicevuto = new String(packetIN.getData(), 0, packetIN.getLength());
+
+            //  !!!     Importante: gli aggiornamenti grafici (root.getChildren().add) devono tornare sul thread JavaFX tramite Platform.runLater
+            String finalMessaggioRicevuto = messaggioRicevuto; //se messo nella lambda function deve essere finale
+            Platform.runLater(() -> {
+                elaboraMessaggio(finalMessaggioRicevuto, root);
+            });
+
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+
+            String messaggio = creaMessaggio();
+            byte[] bufferOut = messaggio.getBytes();
+            DatagramPacket packetOUT = new DatagramPacket(bufferOut, bufferOut.length, group, port);
+
+            try {
+                socket.send(packetOUT);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+
+        } while (!messaggioRicevuto.equals("stop"));
+    }
+
+    private String creaMessaggio() {
+
+        String messaggio = "check:" +
+                giocatoreC.getTranslateX() + ":" +
+                giocatoreC.getTranslateY() + ":" +
+                giocatoreC.getFill() + ":" +
+                (giocatoreC.getStrokeWidth() > 0) + ":over";
+
+        return messaggio;
     }
 
     private void elaboraMessaggio(String messaggio, Pane root) {
+
+        //root.getChildren().removeIf(node -> node instanceof Circle && node != giocatoreC);
+
+
         String[] info = messaggio.split(":");
         int ctr = 0;
 
-        while (ctr < info.length && !info[ctr].equals("over")) {
+        while (ctr < info.length && !info[ctr].equals("over") && !info[ctr].equals("check")) {  //diverso da check perche si legge anche i messaggi inviati verso il server
             switch (info[ctr]) {
                 case "b":
                     Rectangle blocco = new Rectangle(50, 50, Color.BROWN);
@@ -87,15 +129,40 @@ public class Tabellone extends Application {
                     break;
 
                 case "g":
-                    Circle g = creaCerchio(info, ctr);
-                    root.getChildren().add(g);
+                    String coloreID = info[ctr + 3]; //usa il colore come ID unico
+                    double nuovaX = Double.parseDouble(info[ctr + 1]);
+                    double nuovaY = Double.parseDouble(info[ctr + 2]);
+
+                    Circle altroG = altriGiocatori.get(coloreID);
+
+                    if (altroG == null) {
+                        altroG = creaCerchio(info, ctr);
+                        altriGiocatori.put(coloreID, altroG);
+                        root.getChildren().add(altroG);
+                    } else {
+                        altroG.setTranslateX(nuovaX);
+                        altroG.setTranslateY(nuovaY);
+
+                        if (Boolean.parseBoolean(info[ctr + 4])) {
+                            altroG.setStroke(Color.BLACK);
+                            altroG.setStrokeWidth(5);
+                        } else {
+                            altroG.setStrokeWidth(0);
+                        }
+                    }
                     ctr += 5;
-                    break;
 
                 case "gC":
-                    Circle giocatoreC = creaCerchio(info, ctr);
-                    avviaTimerMovimento(giocatoreC);
-                    root.getChildren().add(giocatoreC);
+                    if (!creatoGiocatoreC) {
+                        giocatoreC = creaCerchio(info, ctr);
+                        creatoGiocatoreC = true;
+
+                        avviaTimerMovimento(giocatoreC);
+                        root.getChildren().add(giocatoreC);
+                    } else {
+                        giocatoreC.setTranslateX(Integer.parseInt(info[ctr + 1]));
+                        giocatoreC.setTranslateY(Integer.parseInt(info[ctr + 2]));
+                    }
                     ctr += 5;
                     break;
                 default:
@@ -109,6 +176,7 @@ public class Tabellone extends Application {
         c.setTranslateX(Integer.parseInt(info[ctr + 1]));
         c.setTranslateY(Integer.parseInt(info[ctr + 2]));
         c.setFill(Color.valueOf(info[ctr + 3].toUpperCase()));
+
         if (Boolean.parseBoolean(info[ctr + 4])) {
             c.setStroke(Color.BLACK);
             c.setStrokeWidth(5);

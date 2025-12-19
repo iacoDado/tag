@@ -22,7 +22,7 @@ public class Server {
             socket.send(dp);
 
             try {
-                Thread.sleep(500);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
             }
