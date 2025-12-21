@@ -8,12 +8,11 @@ import javafx.scene.shape.Circle;
 import javafx.scene.shape.Rectangle;
 import javafx.stage.Stage;
 
-
-import java.io.IOException;
 import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
-
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -21,179 +20,282 @@ import java.util.Set;
 
 public class Tabellone extends Application {
 
-    private final Set<String> tastiPremuti = new HashSet<>();
-    private Circle giocatoreC;
-    boolean creatoGiocatoreC = false;
-    //mappa che associa il colore del giocatore al suo oggetto Circle
-    private final Map<String, Circle> altriGiocatori = new HashMap<>();
+    private static final String SERVER_HOST = "localhost";
+    private static final int SERVER_PORT = 1234;
+    private static final String MULTICAST_IP = "230.0.0.1";
+    private static final int MULTICAST_PORT = 4446;
+
+    private DatagramSocket unicastSocket;
+    private MulticastSocket multicastSocket;
+
+    private int playerId = -1;
+    private Circle me;
+    private String myColor = "GRAY";
+
+    private final Map<Integer, Circle> others = new HashMap<Integer, Circle>();
+    private final Map<String, Rectangle> walls = new HashMap<String, Rectangle>();
+    private final Set<String> keys = new HashSet<String>();
 
     @Override
-    public void start(Stage primaryStage) {
+    public void start(Stage primaryStage) throws Exception {
         Pane root = new Pane();
-        Scene scene = new Scene(root, 500, 500);
-
-        //gestione tasti sulla scena
-        scene.setOnKeyPressed(e -> {
-            tastiPremuti.add(e.getCode().toString());
-            //System.out.println("Tasto premuto: " + e.getCode()); // DEBUG!!! togliere dopo
-        });
-        scene.setOnKeyReleased(e -> tastiPremuti.remove(e.getCode().toString()));
-
-        primaryStage.setTitle("Tag UDP");
+        Scene scene = new Scene(root, 800, 800);
+        primaryStage.setTitle("Tag UDP - Client");
         primaryStage.setScene(scene);
         primaryStage.show();
 
-        //richiedi il focus DOPO lo show
-        root.setFocusTraversable(true);
-        root.requestFocus();
+        scene.setOnKeyPressed(e -> keys.add(e.getCode().toString()));
+        scene.setOnKeyReleased(e -> keys.remove(e.getCode().toString()));
 
-        //avvia la rete in un thread separato per non bloccare la UI
-        Thread networkThread = new Thread(() -> {
-            try {
-                inizializzaTabellone(root);
-            } catch (IOException e) {
-                e.printStackTrace();
+        //socket unicast (client)
+        unicastSocket = new DatagramSocket();
+
+        //multicast socket per ricevere lo state
+        multicastSocket = new MulticastSocket(MULTICAST_PORT);
+        InetAddress group = InetAddress.getByName(MULTICAST_IP);
+        multicastSocket.joinGroup(group);
+
+        //ricevitore per WELCOME (unicast)
+        Thread unicastReceiver = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                unicastReceiveLoop(root);
             }
         });
-        networkThread.setDaemon(true); //chiude il thread quando chiudi l'app
-        networkThread.start();
-    }
+        unicastReceiver.setDaemon(true);
+        unicastReceiver.start();
 
-    private void inizializzaTabellone(Pane root) throws IOException {
-        int port = 1234;
-        MulticastSocket socket = new MulticastSocket(port);
-        InetAddress group = InetAddress.getByName("230.0.0.1");
-        socket.joinGroup(group);
-
-        String messaggioRicevuto = "";
-
-        do {
-            byte[] bufferIn = new byte[1024];
-            DatagramPacket packetIN = new DatagramPacket(bufferIn, bufferIn.length);
-
-            socket.receive(packetIN);
-            messaggioRicevuto = new String(packetIN.getData(), 0, packetIN.getLength());
-
-            //  !!!     Importante: gli aggiornamenti grafici (root.getChildren().add) devono tornare sul thread JavaFX tramite Platform.runLater
-            String finalMessaggioRicevuto = messaggioRicevuto; //se messo nella lambda function deve essere finale
-            Platform.runLater(() -> {
-                elaboraMessaggio(finalMessaggioRicevuto, root);
-            });
-
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+        //ricevitore multicast per lo state
+        Thread multicastReceiver = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                multicastReceiveLoop(root);
             }
+        });
+        multicastReceiver.setDaemon(true);
+        multicastReceiver.start();
 
-            String messaggio = creaMessaggio();
-            byte[] bufferOut = messaggio.getBytes();
-            DatagramPacket packetOUT = new DatagramPacket(bufferOut, bufferOut.length, group, port);
+        //invio HELLO al server per ottenere WELCOME
+        sendUnicast("HELLO");
 
+        primaryStage.setOnCloseRequest(e -> {
             try {
-                socket.send(packetOUT);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+                multicastSocket.leaveGroup(group);
+            } catch (Exception ex) {
+                //
             }
-
-        } while (!messaggioRicevuto.equals("stop"));
+            multicastSocket.close();
+            unicastSocket.close();
+        });
     }
 
-    private String creaMessaggio() {
-
-        String messaggio = "check:" +
-                giocatoreC.getTranslateX() + ":" +
-                giocatoreC.getTranslateY() + ":" +
-                giocatoreC.getFill() + ":" +
-                (giocatoreC.getStrokeWidth() > 0) + ":over";
-
-        return messaggio;
+    private void unicastReceiveLoop(Pane root) {
+        byte[] buf = new byte[1024];
+        while (true) {
+            try {
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                unicastSocket.receive(p);
+                String msg = new String(p.getData(), 0, p.getLength(), "UTF-8");
+                System.out.println("unicast ricevuto -> " + msg);
+                if (msg.startsWith("WELCOME|")) {
+                    handleWelcome(msg, root);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                break;
+            }
+        }
     }
 
-    private void elaboraMessaggio(String messaggio, Pane root) {
+    private void handleWelcome(String msg, Pane root) {
+        String[] parts = msg.split("\\|");
+        if (!(parts.length < 6)) {
+            try {
+                final int id = Integer.parseInt(parts[1]);
+                final String color = parts[2];
+                final boolean isIt = Boolean.parseBoolean(parts[3]);
+                final int x = Integer.parseInt(parts[4]);
+                final int y = Integer.parseInt(parts[5]);
 
-        //root.getChildren().removeIf(node -> node instanceof Circle && node != giocatoreC);
+                this.playerId = id;
+                this.myColor = color;
 
-
-        String[] info = messaggio.split(":");
-        int ctr = 0;
-
-        while (ctr < info.length && !info[ctr].equals("over") && !info[ctr].equals("check")) {  //diverso da check perche si legge anche i messaggi inviati verso il server
-            switch (info[ctr]) {
-                case "b":
-                    Rectangle blocco = new Rectangle(50, 50, Color.BROWN);
-                    blocco.setTranslateX(Integer.parseInt(info[ctr + 1]));
-                    blocco.setTranslateY(Integer.parseInt(info[ctr + 2]));
-                    root.getChildren().add(blocco);
-                    ctr += 3;
-                    break;
-
-                case "g":
-                    String coloreID = info[ctr + 3]; //usa il colore come ID unico
-                    double nuovaX = Double.parseDouble(info[ctr + 1]);
-                    double nuovaY = Double.parseDouble(info[ctr + 2]);
-
-                    Circle altroG = altriGiocatori.get(coloreID);
-
-                    if (altroG == null) {
-                        altroG = creaCerchio(info, ctr);
-                        altriGiocatori.put(coloreID, altroG);
-                        root.getChildren().add(altroG);
-                    } else {
-                        altroG.setTranslateX(nuovaX);
-                        altroG.setTranslateY(nuovaY);
-
-                        if (Boolean.parseBoolean(info[ctr + 4])) {
-                            altroG.setStroke(Color.BLACK);
-                            altroG.setStrokeWidth(5);
-                        } else {
-                            altroG.setStrokeWidth(0);
+                Platform.runLater(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (me == null) {
+                            me = new Circle(12.5);
+                            me.setFill(Color.valueOf(myColor));
+                            me.setTranslateX(x);
+                            me.setTranslateY(y);
+                            if (isIt) {
+                                me.setStroke(Color.BLACK);
+                                me.setStrokeWidth(5);
+                            }
+                            getRootPane(root).getChildren().add(me);
+                            startMovement();
                         }
                     }
-                    ctr += 5;
+                });
 
-                case "gC":
-                    if (!creatoGiocatoreC) {
-                        giocatoreC = creaCerchio(info, ctr);
-                        creatoGiocatoreC = true;
-
-                        avviaTimerMovimento(giocatoreC);
-                        root.getChildren().add(giocatoreC);
-                    } else {
-                        giocatoreC.setTranslateX(Integer.parseInt(info[ctr + 1]));
-                        giocatoreC.setTranslateY(Integer.parseInt(info[ctr + 2]));
-                    }
-                    ctr += 5;
-                    break;
-                default:
-                    ctr++;
+                System.out.println("WELCOME id=" + id + " color=" + color + " isIt=" + isIt);
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         }
     }
 
-    private Circle creaCerchio(String[] info, int ctr) {
-        Circle c = new Circle(12.5);
-        c.setTranslateX(Integer.parseInt(info[ctr + 1]));
-        c.setTranslateY(Integer.parseInt(info[ctr + 2]));
-        c.setFill(Color.valueOf(info[ctr + 3].toUpperCase()));
+    private void multicastReceiveLoop(Pane root) {
+        byte[] buf = new byte[1024];
+        while (true) {
+            try {
+                DatagramPacket p = new DatagramPacket(buf, buf.length);
+                multicastSocket.receive(p);
+                String msg = new String(p.getData(), 0, p.getLength());
 
-        if (Boolean.parseBoolean(info[ctr + 4])) {
-            c.setStroke(Color.BLACK);
-            c.setStrokeWidth(5);
+
+                final String finalMsg = msg;
+                Platform.runLater(new Runnable() {
+                    @Override
+                    public void run() {
+                        parseState(finalMsg, root);
+                    }
+                });
+            } catch (Exception e) {
+                e.printStackTrace();
+                break;
+            }
         }
-        return c;
     }
 
-    private void avviaTimerMovimento(Circle giocatoreC) {
+    private void parseState(String msg, Pane root) {
+        if (!(msg == null || !msg.startsWith("STATE|"))) {
+
+            //segments separati da ';'
+            String payload = msg.substring("STATE|".length()); //toglie STATE|
+            String[] segments = payload.split(";");
+            for (int i = 0; i < segments.length; i++) {
+                String s = segments[i];
+                if (s.startsWith("B|")) {
+                    String[] parts = s.split("\\|");
+                    if (parts.length >= 3) {
+                        int x = Integer.parseInt(parts[1]);
+                        int y = Integer.parseInt(parts[2]);
+                        String key = x + ":" + y;
+                        if (!walls.containsKey(key)) {
+                            Rectangle r = new Rectangle(50, 50);
+                            r.setFill(Color.BROWN);
+                            r.setTranslateX(x);
+                            r.setTranslateY(y);
+                            walls.put(key, r);
+                            root.getChildren().add(r);
+                        }
+                    }
+                } else if (s.startsWith("P|")) {
+                    String[] parts = s.split("\\|");
+                    if (parts.length >= 6) {
+                        int id = Integer.parseInt(parts[1]);
+                        int x = Integer.parseInt(parts[2]);
+                        int y = Integer.parseInt(parts[3]);
+                        String color = parts[4];
+                        boolean isIt = Boolean.parseBoolean(parts[5]);
+
+                        if (id == this.playerId) {
+                            if (me == null) {
+                                me = new Circle(12.5);
+                                try {
+                                    me.setFill(Color.valueOf(color));
+                                } catch (Exception ex) {
+                                    me.setFill(Color.GRAY);
+                                }
+                                me.setTranslateX(x);
+                                me.setTranslateY(y);
+                                if (isIt) {
+                                    me.setStroke(Color.BLACK);
+                                    me.setStrokeWidth(5);
+                                }
+                                root.getChildren().add(me);
+                                startMovement();
+                            } else {
+                                me.setTranslateX(x);
+                                me.setTranslateY(y);
+                                if (isIt) {
+                                    me.setStroke(Color.BLACK);
+                                    me.setStrokeWidth(5);
+                                } else {
+                                    me.setStrokeWidth(0);
+                                }
+                            }
+                        } else {
+                            Circle o = others.get(id);
+                            if (o == null) {
+                                Circle c = new Circle(12.5);
+                                try {
+                                    c.setFill(Color.valueOf(color));
+                                } catch (Exception ex) {
+                                    c.setFill(Color.GRAY);
+                                }
+                                c.setTranslateX(x);
+                                c.setTranslateY(y);
+                                if (isIt) {
+                                    c.setStroke(Color.BLACK);
+                                    c.setStrokeWidth(5);
+                                }
+                                others.put(id, c);
+                                root.getChildren().add(c);
+                            } else {
+                                o.setTranslateX(x);
+                                o.setTranslateY(y);
+                                if (isIt) {
+                                    o.setStroke(Color.BLACK);
+                                    o.setStrokeWidth(5);
+                                } else {
+                                    o.setStrokeWidth(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void startMovement() {
         new AnimationTimer() {
             @Override
             public void handle(long now) {
-                double velocita = 3.0;
-                if (tastiPremuti.contains("UP")) giocatoreC.setTranslateY(giocatoreC.getTranslateY() - velocita);
-                if (tastiPremuti.contains("DOWN")) giocatoreC.setTranslateY(giocatoreC.getTranslateY() + velocita);
-                if (tastiPremuti.contains("LEFT")) giocatoreC.setTranslateX(giocatoreC.getTranslateX() - velocita);
-                if (tastiPremuti.contains("RIGHT")) giocatoreC.setTranslateX(giocatoreC.getTranslateX() + velocita);
+                if (me == null || playerId < 0) return;
+                double dx = 0;
+                double dy = 0;
+                if (keys.contains("LEFT")) dx -= 3;
+                if (keys.contains("RIGHT")) dx += 3;
+                if (keys.contains("UP")) dy -= 3;
+                if (keys.contains("DOWN")) dy += 3;
+                if (dx != 0 || dy != 0) {
+                    String msg = "INPUT|" + playerId + "|" + dx + "|" + dy;
+                    sendUnicast(msg);
+                }
             }
         }.start();
+    }
+
+    private void sendUnicast(String msg) {
+        try {
+            byte[] data = msg.getBytes();
+            DatagramPacket p = new DatagramPacket(data, data.length, InetAddress.getByName(SERVER_HOST), SERVER_PORT);
+            unicastSocket.send(p);
+            //log
+            //System.out.println("inviato -> " + msg);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private Pane getRootPane(Pane root) {
+        return root;
+    }
+
+    public static void main(String[] args) {
+        launch(args);
     }
 }
