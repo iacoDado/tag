@@ -95,7 +95,7 @@ public class Tabellone extends Application {
             try {
                 DatagramPacket p = new DatagramPacket(buf, buf.length);
                 unicastSocket.receive(p);
-                String msg = new String(p.getData(), 0, p.getLength(), "UTF-8");
+                String msg = new String(p.getData(), 0, p.getLength());
                 System.out.println("unicast ricevuto -> " + msg);
                 if (msg.startsWith("WELCOME|")) {
                     handleWelcome(msg, root);

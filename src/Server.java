@@ -1,40 +1,3 @@
-/*import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.InetAddress;
-import java.net.MulticastSocket;
-import java.util.Date;
-
-public class Server {
-    public static void main(String[] args) throws IOException {
-        byte[] bufferOUT = new byte[1024];
-        byte[] bufferIN = new byte[1024];
-        int porta = 1234;
-        InetAddress gruppo = InetAddress.getByName("230.0.0.1");
-        MulticastSocket socket = new MulticastSocket();
-        String toSend = "";
-
-        boolean exit = false;
-        while(!exit) {
-            toSend = "b:50:200:g:150:200:BLUE:true:gC:150:300:RED:false:over";
-            bufferOUT = toSend.getBytes();
-            DatagramPacket dp;
-            dp = new DatagramPacket(bufferOUT, bufferOUT.length, gruppo, porta);
-            socket.send(dp);
-
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
-        }
-
-        System.out.println("Server chiude...");
-        socket.close();
-    }
-}
-*/
-
-
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -43,6 +6,7 @@ import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class Server {
@@ -50,6 +14,11 @@ public class Server {
     private static final int SERVER_PORT = 1234;
     private static final String MULTICAST_IP = "230.0.0.1";
     private static final int MULTICAST_PORT = 4446;
+
+    private static final int N_MURI = 30;
+    private static final double PLAYER_DIAMETER = 25;
+    private static final double WALL_DIM = 50;
+
 
     private DatagramSocket socket;
     private InetAddress multicastGroup;
@@ -67,7 +36,7 @@ public class Server {
 
     private final Map<Integer, Player> players = new ConcurrentHashMap<Integer, Player>();
     private final List<int[]> walls = new ArrayList<int[]>();
-    private final String[] colors = new String[] { "RED", "BLUE", "GREEN", "YELLOW", "MAGENTA", "CYAN" };
+    private final String[] colors = new String[]{"RED", "BLUE", "GREEN", "YELLOW", "MAGENTA", "CYAN"};
 
     public Server() throws Exception {
         socket = new DatagramSocket(SERVER_PORT);
@@ -82,13 +51,21 @@ public class Server {
     }
 
     public void start() {
-        Thread recv = new Thread(new Runnable() { public void run() { receiveLoop(); } });
-        recv.start(); // non daemon
+        Thread recv = new Thread(new Runnable() {
+            public void run() {
+                receiveLoop();
+            }
+        });
+        recv.start(); //non daemon
 
-        Thread state = new Thread(new Runnable() { public void run() { stateLoop(); } });
-        state.start(); // non daemon
+        Thread state = new Thread(new Runnable() {
+            public void run() {
+                stateLoop();
+            }
+        });
+        state.start(); //non daemon
 
-// blocca il main thread così la JVM resta viva
+        //tiene occupato il main thread così la JVM resta viva
         while (true) {
             try {
                 Thread.sleep(1000);
@@ -100,14 +77,14 @@ public class Server {
     }
 
     private void receiveLoop() {
-        byte[] buf = new byte[2048];
+        byte[] buf = new byte[1024];
         while (true) {
             try {
                 DatagramPacket p = new DatagramPacket(buf, buf.length);
                 socket.receive(p);
-                String msg = new String(p.getData(), 0, p.getLength(), "UTF-8");
+                String msg = new String(p.getData(), 0, p.getLength());
                 SocketAddress addr = p.getSocketAddress();
-                System.out.println("[SERVER] ricevuto da " + addr + " -> " + msg);
+                System.out.println("ricevuto da " + addr + " -> " + msg);
                 handleMessage(msg, addr);
             } catch (Exception e) {
                 e.printStackTrace();
@@ -124,7 +101,7 @@ public class Server {
         } else if ("INPUT".equals(type)) {
             handleInput(parts, addr);
         } else {
-            System.out.println("[SERVER] tipo messaggio sconosciuto: " + type);
+            System.out.println("tipo messaggio sconosciuto: " + type);
         }
     }
 
@@ -138,10 +115,10 @@ public class Server {
         p.address = addr;
         players.put(p.id, p);
 
-        String welcome = "WELCOME|" + p.id + "|" + p.color + "|" + p.isIt + "|" + (int)p.x + "|" + (int)p.y;
+        String welcome = "WELCOME|" + p.id + "|" + p.color + "|" + p.isIt + "|" + (int) p.x + "|" + (int) p.y;
         sendUnicast(welcome, addr);
 
-        System.out.println("[SERVER] creato player id=" + p.id + " color=" + p.color + " isIt=" + p.isIt + " addr=" + addr);
+        System.out.println("creato player id=" + p.id + " color=" + p.color + " isIt=" + p.isIt + " addr=" + addr);
     }
 
     private void handleInput(String[] parts, SocketAddress addr) {
@@ -154,23 +131,32 @@ public class Server {
             Player p = players.get(id);
             if (p == null) return;
 
-            // opzionale: verifica che l'input arrivi dall'indirizzo registrato
             if (p.address != null) {
                 if (!p.address.equals(addr)) {
-                    // accetta comunque ma logga
-                    System.out.println("[SERVER] INPUT id mismatch addr: " + addr + " vs " + p.address);
+                    //accetta comunque ma logga
+                    System.out.println("INPUT indirizzi diversi: " + addr + " vs " + p.address);
                 }
             }
 
-            // semplice update (no collision for brevity)
-            p.x += dx;
-            p.y += dy;
+            //semplice update       !!! AGGIUNGERE CONTROLLO COLLISIONI
+            if (checkCollisions(p.x + dx, p.y + dy)) {
+                p.x += dx;
+                p.y += dy;
+            }
 
-            // clamp su bordi (0..800)
-            if (p.x < 0) p.x = 0;
-            if (p.y < 0) p.y = 0;
-            if (p.x > 800) p.x = 800;
-            if (p.y > 800) p.y = 800;
+            if (checkTag(id)) {
+                for (Player pl : players.values()) {
+                    pl.isIt = false;
+                }
+                p.isIt = true;
+            }
+
+
+            //check su bordi (0,800)
+            if (p.x < PLAYER_DIAMETER / 2) p.x = PLAYER_DIAMETER / 2;
+            if (p.y < PLAYER_DIAMETER / 2) p.y = PLAYER_DIAMETER / 2;
+            if (p.x > 800 - PLAYER_DIAMETER / 2) p.x = 800 - PLAYER_DIAMETER / 2;
+            if (p.y > 800 - PLAYER_DIAMETER / 2) p.y = 800 - PLAYER_DIAMETER / 2;
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -182,21 +168,23 @@ public class Server {
             try {
                 StringBuilder sb = new StringBuilder();
                 sb.append("STATE|");
-                // muri
+
+                //muri
                 for (int[] w : walls) {
                     sb.append("B|").append(w[0]).append("|").append(w[1]).append(";");
                 }
-                // players
+
+                //players
                 for (Player p : players.values()) {
                     sb.append("P|").append(p.id).append("|")
-                            .append((int)p.x).append("|").append((int)p.y).append("|")
+                            .append((int) p.x).append("|").append((int) p.y).append("|")
                             .append(p.color).append("|").append(p.isIt).append(";");
                 }
                 sb.append("END");
 
-                byte[] data = sb.toString().getBytes("UTF-8");
-                DatagramPacket pkt = new DatagramPacket(data, data.length, multicastGroup, MULTICAST_PORT);
-                socket.send(pkt);
+                byte[] data = sb.toString().getBytes();
+                DatagramPacket packet = new DatagramPacket(data, data.length, multicastGroup, MULTICAST_PORT);
+                socket.send(packet);
 
                 Thread.sleep(100);
             } catch (Exception e) {
@@ -206,25 +194,68 @@ public class Server {
     }
 
     private void sendUnicast(String msg, SocketAddress addr) throws Exception {
-        byte[] data = msg.getBytes("UTF-8");
-        if (addr instanceof InetSocketAddress) {
-            InetSocketAddress isa = (InetSocketAddress) addr;
-            DatagramPacket p = new DatagramPacket(data, data.length, isa.getAddress(), isa.getPort());
-            socket.send(p);
-        } else {
-            // fallback (non probabile)
-            DatagramPacket p = new DatagramPacket(data, data.length);
-            socket.send(p);
+        byte[] data = msg.getBytes();
+
+        InetSocketAddress isa = (InetSocketAddress) addr;
+        DatagramPacket p = new DatagramPacket(data, data.length, isa.getAddress(), isa.getPort());
+        socket.send(p);
+
+    }
+
+    private void generateWalls() { //        !!! RIFARE SERIAMENTE
+        Random r = new Random();
+
+        for (int i = 0; i < N_MURI; i++) {
+            walls.add(new int[]{(int) (r.nextInt(700) + WALL_DIM), (int) (r.nextInt(700) + WALL_DIM)});
         }
     }
 
-    private void generateWalls() {
-        // esempio semplice: fila di muri orizzontali
-        for (int i = 0; i < 15; i++) {
-            walls.add(new int[] { 50 + i * 40, 300 });
+    private boolean checkCollisions(double x, double y) { //     !!! fare meglio (togliere 100 return)
+        //true se ok false se c'è collisione
+
+        boolean check = true;
+
+        for (int[] w : walls) {
+            if (isInsideSquare(x, y, w[0], w[1])) {
+                return false;
+            }
         }
-        // altri muri sparsi
-        walls.add(new int[] { 200, 100 });
-        walls.add(new int[] { 400, 500 });
+
+        return true;
+    }
+
+    private boolean checkTag(int id) { //     !!! fare meglio (togliere 100 return)
+        //true se preso false se niente
+
+        double x = players.get(id).x;
+        double y = players.get(id).y;
+
+        for (Player p : players.values()) {
+            if (isInsideCircle(x, y, p.x, p.y) && p.isIt) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isInsideSquare(double x1, double y1, double x2, double y2) {
+
+        //x2 muro   x1 player
+        return (x1 + PLAYER_DIAMETER / 2 >= x2 && x1 - PLAYER_DIAMETER / 2 <= x2 + WALL_DIM) &&
+                (y1 + PLAYER_DIAMETER / 2 >= y2 && y1 - PLAYER_DIAMETER / 2 <= y2 + WALL_DIM);
+    }
+
+    private boolean isInsideCircle(double x1, double y1, double centerX, double centerY) {
+        //distanza punto punto e vedo distanza con raggio
+
+        double dx = x1 - centerX;
+        double dy = y1 - centerY;
+
+        double squaredDistance = (dx * dx) + (dy * dy);
+
+        double squaredRadius = PLAYER_DIAMETER * PLAYER_DIAMETER;
+
+        return squaredDistance <= squaredRadius;
     }
 }
